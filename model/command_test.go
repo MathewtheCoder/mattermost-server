@@ -1,5 +1,5 @@
-// Copyright (c) 2016-present Mattermost, Inc. All Rights Reserved.
-// See License.txt for license information.
+// Copyright (c) 2015-present Mattermost, Inc. All Rights Reserved.
+// See LICENSE.txt for license information.
 
 package model
 
@@ -84,6 +84,9 @@ func TestCommandIsValid(t *testing.T) {
 	require.NotNil(t, o.IsValid(), "should be invalid")
 
 	o.URL = "1234"
+	require.NotNil(t, o.IsValid(), "should be invalid")
+
+	o.URL = "https:////example.com"
 	require.NotNil(t, o.IsValid(), "should be invalid")
 
 	o.URL = "https://example.com"

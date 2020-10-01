@@ -1,17 +1,19 @@
-// Copyright (c) 2016-present Mattermost, Inc. All Rights Reserved.
-// See License.txt for license information.
+// Copyright (c) 2015-present Mattermost, Inc. All Rights Reserved.
+// See LICENSE.txt for license information.
 
 package app
 
 import (
-	"github.com/stretchr/testify/assert"
 	"testing"
 
-	"github.com/mattermost/mattermost-server/model"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/mattermost/mattermost-server/v5/model"
 )
 
 func TestCheckIfRolesGrantPermission(t *testing.T) {
-	th := Setup(t).InitBasic()
+	th := Setup(t)
 	defer th.TearDown()
 
 	cases := []struct {
@@ -30,7 +32,48 @@ func TestCheckIfRolesGrantPermission(t *testing.T) {
 	}
 
 	for _, testcase := range cases {
-		assert.Equal(t, th.App.RolesGrantPermission(testcase.roles, testcase.permissionId), testcase.shouldGrant)
+		require.Equal(t, th.App.RolesGrantPermission(testcase.roles, testcase.permissionId), testcase.shouldGrant)
 	}
 
+}
+
+func TestChannelRolesGrantPermission(t *testing.T) {
+	testPermissionInheritance(t, func(t *testing.T, th *TestHelper, testData permissionInheritanceTestData) {
+		require.Equal(t, testData.shouldHavePermission, th.App.RolesGrantPermission([]string{testData.channelRole.Name}, testData.permission.Id), "row: %+v\n", testData.truthTableRow)
+	})
+}
+
+func TestHasPermissionToTeam(t *testing.T) {
+	th := Setup(t).InitBasic()
+	defer th.TearDown()
+
+	assert.True(t, th.App.HasPermissionToTeam(th.BasicUser.Id, th.BasicTeam.Id, model.PERMISSION_LIST_TEAM_CHANNELS))
+	th.RemoveUserFromTeam(th.BasicUser, th.BasicTeam)
+	assert.False(t, th.App.HasPermissionToTeam(th.BasicUser.Id, th.BasicTeam.Id, model.PERMISSION_LIST_TEAM_CHANNELS))
+
+	assert.True(t, th.App.HasPermissionToTeam(th.SystemAdminUser.Id, th.BasicTeam.Id, model.PERMISSION_LIST_TEAM_CHANNELS))
+	th.LinkUserToTeam(th.SystemAdminUser, th.BasicTeam)
+	assert.True(t, th.App.HasPermissionToTeam(th.SystemAdminUser.Id, th.BasicTeam.Id, model.PERMISSION_LIST_TEAM_CHANNELS))
+	th.RemovePermissionFromRole(model.PERMISSION_LIST_TEAM_CHANNELS.Id, model.TEAM_USER_ROLE_ID)
+	assert.True(t, th.App.HasPermissionToTeam(th.SystemAdminUser.Id, th.BasicTeam.Id, model.PERMISSION_LIST_TEAM_CHANNELS))
+	th.RemoveUserFromTeam(th.SystemAdminUser, th.BasicTeam)
+	assert.True(t, th.App.HasPermissionToTeam(th.SystemAdminUser.Id, th.BasicTeam.Id, model.PERMISSION_LIST_TEAM_CHANNELS))
+}
+
+func TestHasPermissionToCategory(t *testing.T) {
+	th := Setup(t).InitBasic()
+	defer th.TearDown()
+	session, err := th.App.CreateSession(&model.Session{UserId: th.BasicUser.Id, Props: model.StringMap{}})
+	require.Nil(t, err)
+
+	categories, err := th.App.GetSidebarCategories(th.BasicUser.Id, th.BasicTeam.Id)
+	require.Nil(t, err)
+
+	_, err = th.App.GetSession(session.Token)
+	require.Nil(t, err)
+	require.True(t, th.App.SessionHasPermissionToCategory(*session, th.BasicUser.Id, th.BasicTeam.Id, categories.Order[0]))
+
+	categories2, err := th.App.GetSidebarCategories(th.BasicUser2.Id, th.BasicTeam.Id)
+	require.Nil(t, err)
+	require.False(t, th.App.SessionHasPermissionToCategory(*session, th.BasicUser.Id, th.BasicTeam.Id, categories2.Order[0]))
 }

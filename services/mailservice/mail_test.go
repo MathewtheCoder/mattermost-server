@@ -1,24 +1,27 @@
-// Copyright (c) 2017-present Mattermost, Inc. All Rights Reserved.
-// See License.txt for license information.
+// Copyright (c) 2015-present Mattermost, Inc. All Rights Reserved.
+// See LICENSE.txt for license information.
 
 package mailservice
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"io/ioutil"
+	"net"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
 	"net/mail"
 	"net/smtp"
 
-	"github.com/mattermost/mattermost-server/config"
-	"github.com/mattermost/mattermost-server/model"
-	"github.com/mattermost/mattermost-server/services/filesstore"
-	"github.com/mattermost/mattermost-server/utils"
+	"github.com/mattermost/mattermost-server/v5/config"
+	"github.com/mattermost/mattermost-server/v5/model"
+	"github.com/mattermost/mattermost-server/v5/services/filesstore"
+	"github.com/mattermost/mattermost-server/v5/utils"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -31,7 +34,7 @@ func TestMailConnectionFromConfig(t *testing.T) {
 	conn, err := ConnectToSMTPServer(cfg)
 	require.Nil(t, err, "Should connect to the SMTP Server %v", err)
 
-	_, err = NewSMTPClient(conn, cfg)
+	_, err = NewSMTPClient(context.Background(), conn, cfg)
 
 	require.Nil(t, err, "Should get new SMTP client")
 
@@ -58,10 +61,11 @@ func TestMailConnectionAdvanced(t *testing.T) {
 			SmtpPort:             *cfg.EmailSettings.SMTPPort,
 		},
 	)
-
 	require.Nil(t, err, "Should connect to the SMTP Server")
+	defer conn.Close()
 
 	_, err2 := NewSMTPClientAdvanced(
+		context.Background(),
 		conn,
 		utils.GetHostnameFromSiteURL(*cfg.ServiceSettings.SiteURL),
 		&SmtpConnectionInfo{
@@ -73,12 +77,45 @@ func TestMailConnectionAdvanced(t *testing.T) {
 			Auth:                 *cfg.EmailSettings.EnableSMTPAuth,
 			SmtpUsername:         *cfg.EmailSettings.SMTPUsername,
 			SmtpPassword:         *cfg.EmailSettings.SMTPPassword,
+			SmtpServerTimeout:    1,
 		},
 	)
-
 	require.Nil(t, err2, "Should get new SMTP client")
 
-	_, err3 := ConnectToSMTPServerAdvanced(
+	l, err := net.Listen("tcp", "localhost:") // emulate nc -l <random-port>
+	require.Nil(t, err, "Should've open a network socket and listen")
+	defer l.Close()
+
+	connInfo := &SmtpConnectionInfo{
+		ConnectionSecurity:   *cfg.EmailSettings.ConnectionSecurity,
+		SkipCertVerification: *cfg.EmailSettings.SkipServerCertificateVerification,
+		SmtpServerName:       *cfg.EmailSettings.SMTPServer,
+		SmtpServerHost:       strings.Split(l.Addr().String(), ":")[0],
+		SmtpPort:             strings.Split(l.Addr().String(), ":")[1],
+		Auth:                 *cfg.EmailSettings.EnableSMTPAuth,
+		SmtpUsername:         *cfg.EmailSettings.SMTPUsername,
+		SmtpPassword:         *cfg.EmailSettings.SMTPPassword,
+		SmtpServerTimeout:    1,
+	}
+
+	conn2, err := ConnectToSMTPServerAdvanced(connInfo)
+	require.Nil(t, err, "Should connect to the SMTP Server")
+	defer conn2.Close()
+
+	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+
+	_, err3 := NewSMTPClientAdvanced(
+		ctx,
+		conn2,
+		utils.GetHostnameFromSiteURL(*cfg.ServiceSettings.SiteURL),
+		connInfo,
+	)
+	require.NotNil(t, err3, "Should get a timeout get while creating a new SMTP client")
+	assert.Equal(t, err3.Id, "utils.mail.connect_smtp.open_tls.app_error")
+
+	_, err4 := ConnectToSMTPServerAdvanced(
 		&SmtpConnectionInfo{
 			ConnectionSecurity:   *cfg.EmailSettings.ConnectionSecurity,
 			SkipCertVerification: *cfg.EmailSettings.SkipServerCertificateVerification,
@@ -87,7 +124,7 @@ func TestMailConnectionAdvanced(t *testing.T) {
 			SmtpPort:             "553",
 		},
 	)
-	require.NotNil(t, err3, "Should not connect to the SMTP Server")
+	require.NotNil(t, err4, "Should not connect to the SMTP Server")
 }
 
 func TestSendMailUsingConfig(t *testing.T) {
@@ -101,11 +138,12 @@ func TestSendMailUsingConfig(t *testing.T) {
 	var emailTo = "test@example.com"
 	var emailSubject = "Testing this email"
 	var emailBody = "This is a test from autobot"
+	var emailCC = "test@example.com"
 
 	//Delete all the messages before check the sample email
 	DeleteMailBox(emailTo)
 
-	err2 := SendMailUsingConfig(emailTo, emailSubject, emailBody, cfg, true)
+	err2 := SendMailUsingConfig(emailTo, emailSubject, emailBody, cfg, true, emailCC)
 	require.Nil(t, err2, "Should connect to the SMTP Server")
 
 	//Check if the email was send to the right email address
@@ -128,6 +166,51 @@ func TestSendMailUsingConfig(t *testing.T) {
 	}
 }
 
+func TestSendMailWithEmbeddedFilesUsingConfig(t *testing.T) {
+	utils.T = utils.GetUserTranslations("en")
+
+	fs, err := config.NewFileStore("config.json", false)
+	require.Nil(t, err)
+
+	cfg := fs.Get()
+
+	var emailTo = "test@example.com"
+	var emailSubject = "Testing this email"
+	var emailBody = "This is a test from autobot"
+	var emailCC = "test@example.com"
+
+	//Delete all the messages before check the sample email
+	DeleteMailBox(emailTo)
+
+	embeddedFiles := map[string]io.Reader{
+		"test1.png": bytes.NewReader([]byte("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")),
+		"test2.png": bytes.NewReader([]byte("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")),
+	}
+	err2 := SendMailWithEmbeddedFilesUsingConfig(emailTo, emailSubject, emailBody, embeddedFiles, cfg, true, emailCC)
+	require.Nil(t, err2, "Should connect to the SMTP Server")
+
+	//Check if the email was send to the right email address
+	var resultsMailbox JSONMessageHeaderInbucket
+	err3 := RetryInbucket(5, func() error {
+		var err error
+		resultsMailbox, err = GetMailBox(emailTo)
+		return err
+	})
+	if err3 != nil {
+		t.Log(err3)
+		t.Log("No email was received, maybe due load on the server. Skipping this verification")
+	} else {
+		if len(resultsMailbox) > 0 {
+			require.Contains(t, resultsMailbox[0].To[0], emailTo, "Wrong To: recipient")
+			resultsEmail, err := GetMessageFromMailbox(emailTo, resultsMailbox[0].ID)
+			require.Nil(t, err, "Could not get message from mailbox")
+			require.Contains(t, emailBody, resultsEmail.Body.Text, "Wrong received message %s", resultsEmail.Body.Text)
+			// Usign the message size because the inbucket API doesn't return embedded attachments through the API
+			require.Greater(t, resultsEmail.Size, 1500, "the file size should be more because the embedded attachemtns")
+		}
+	}
+}
+
 func TestSendMailUsingConfigAdvanced(t *testing.T) {
 	utils.T = utils.GetUserTranslations("en")
 
@@ -136,15 +219,8 @@ func TestSendMailUsingConfigAdvanced(t *testing.T) {
 
 	cfg := fs.Get()
 
-	var mimeTo = "test@example.com"
-	var smtpTo = "test2@example.com"
-	var from = mail.Address{Name: "Nobody", Address: "nobody@mattermost.com"}
-	var replyTo = mail.Address{Name: "ReplyTo", Address: "reply_to@mattermost.com"}
-	var emailSubject = "Testing this email"
-	var emailBody = "This is a test from autobot"
-
 	//Delete all the messages before check the sample email
-	DeleteMailBox(smtpTo)
+	DeleteMailBox("test2@example.com")
 
 	fileBackend, err := filesstore.NewFileBackend(&cfg.FileSettings, true)
 	assert.Nil(t, err)
@@ -178,31 +254,43 @@ func TestSendMailUsingConfigAdvanced(t *testing.T) {
 	headers := make(map[string]string)
 	headers["TestHeader"] = "TestValue"
 
-	err = SendMailUsingConfigAdvanced(mimeTo, smtpTo, from, replyTo, emailSubject, emailBody, attachments, embeddedFiles, headers, cfg, true)
+	mail := mailData{
+		mimeTo:        "test@example.com",
+		smtpTo:        "test2@example.com",
+		from:          mail.Address{Name: "Nobody", Address: "nobody@mattermost.com"},
+		replyTo:       mail.Address{Name: "ReplyTo", Address: "reply_to@mattermost.com"},
+		subject:       "Testing this email",
+		htmlBody:      "This is a test from autobot",
+		attachments:   attachments,
+		embeddedFiles: embeddedFiles,
+		mimeHeaders:   headers,
+	}
+
+	err = sendMailUsingConfigAdvanced(mail, cfg, true)
 	require.Nil(t, err, "Should connect to the STMP Server: %v", err)
 
 	//Check if the email was send to the right email address
 	var resultsMailbox JSONMessageHeaderInbucket
 	err = RetryInbucket(5, func() error {
 		var mailErr error
-		resultsMailbox, mailErr = GetMailBox(smtpTo)
+		resultsMailbox, mailErr = GetMailBox(mail.smtpTo)
 		return mailErr
 	})
-	require.Nil(t, err, "No emails found for address %s. error: %v", smtpTo, err)
+	require.Nil(t, err, "No emails found for address %s. error: %v", mail.smtpTo, err)
 	require.NotEqual(t, len(resultsMailbox), 0)
 
-	require.Contains(t, resultsMailbox[0].To[0], mimeTo, "Wrong To recipient")
+	require.Contains(t, resultsMailbox[0].To[0], mail.mimeTo, "Wrong To recipient")
 
-	resultsEmail, err := GetMessageFromMailbox(smtpTo, resultsMailbox[0].ID)
+	resultsEmail, err := GetMessageFromMailbox(mail.smtpTo, resultsMailbox[0].ID)
 	require.Nil(t, err)
 
-	require.Contains(t, emailBody, resultsEmail.Body.Text, "Wrong received message")
+	require.Contains(t, mail.htmlBody, resultsEmail.Body.Text, "Wrong received message")
 
 	// verify that the To header of the email message is set to the MIME recipient, even though we got it out of the SMTP recipient's email inbox
-	assert.Equal(t, mimeTo, resultsEmail.Header["To"][0])
+	assert.Equal(t, mail.mimeTo, resultsEmail.Header["To"][0])
 
 	// verify that the MIME from address is correct - unfortunately, we can't verify the SMTP from address
-	assert.Equal(t, from.String(), resultsEmail.Header["From"][0])
+	assert.Equal(t, mail.from.String(), resultsEmail.Header["From"][0])
 
 	// check that the custom mime headers came through - header case seems to get mutated
 	assert.Equal(t, "TestValue", resultsEmail.Header["Testheader"][0])
@@ -330,7 +418,8 @@ func TestSendMail(t *testing.T) {
 
 	for testName, tc := range testCases {
 		t.Run(testName, func(t *testing.T) {
-			appErr = SendMail(mocm, "", "", mail.Address{}, tc.replyTo, "", "", nil, nil, nil, mockBackend, time.Now())
+			mail := mailData{"", "", mail.Address{}, "", tc.replyTo, "", "", nil, nil, nil}
+			appErr = SendMail(mocm, mail, mockBackend, time.Now())
 			require.Nil(t, appErr)
 			if len(tc.contains) > 0 {
 				require.Contains(t, string(mocm.data), tc.contains)
